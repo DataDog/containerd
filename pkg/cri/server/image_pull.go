@@ -34,11 +34,14 @@ import (
 	containerdimages "github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/labels"
 	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/pkg/cri/server/imageverifier/v1"
+	"github.com/containerd/containerd/pkg/dialer"
 	distribution "github.com/containerd/containerd/reference/docker"
 	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/containerd/remotes/docker/config"
 	"github.com/containerd/imgcrypt"
 	"github.com/containerd/imgcrypt/images/encryption"
+	"github.com/containerd/ttrpc"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/net/context"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
@@ -112,6 +115,17 @@ func (c *criService) PullImage(ctx context.Context, r *runtime.PullImageRequest)
 			return nil, nil
 		}
 	)
+
+	if vAddr := c.config.ImageVerification.Address; vAddr != "" {
+		vctx, vcancel := context.WithTimeout(ctx, 1*time.Second)
+		defer vcancel()
+		conn, err := dialer.ContextDialer(vctx, "unix://"+vAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to image verification plugin: %w", err)
+		}
+		client := imageverifier.NewImageVerifierClient(ttrpc.NewClient(conn))
+		resolver = NewVerifyingResolver(resolver, client)
+	}
 
 	pullOpts := []containerd.RemoteOpt{
 		containerd.WithSchema1Conversion,
