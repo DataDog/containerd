@@ -3,11 +3,11 @@ name: "CodeQL Scan"
 on:
   push:
     branches:
-      - main
+      - master
       - "release/**"
   pull_request:
     branches:
-      - main
+      - master
       - "release/**"
 
 permissions: # added using https://github.com/step-security/secure-workflows
