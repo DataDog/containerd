@@ -46,11 +46,14 @@ import (
 	"github.com/containerd/containerd/pkg/cri/annotations"
 	criconfig "github.com/containerd/containerd/pkg/cri/config"
 	crilabels "github.com/containerd/containerd/pkg/cri/labels"
+	"github.com/containerd/containerd/pkg/cri/server/imageverifier/v1"
+	"github.com/containerd/containerd/pkg/dialer"
 	snpkg "github.com/containerd/containerd/pkg/snapshotters"
 	distribution "github.com/containerd/containerd/reference/docker"
 	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/containerd/remotes/docker/config"
 	"github.com/containerd/containerd/tracing"
+	"github.com/containerd/ttrpc"
 )
 
 // For image management:
@@ -155,6 +158,18 @@ func (c *criService) PullImage(ctx context.Context, r *runtime.PullImageRequest)
 		tracing.Attribute("image.ref", ref),
 		tracing.Attribute("snapshotter.name", snapshotter),
 	)
+
+	if vAddr := c.config.ImageVerification.Address; vAddr != "" {
+		vctx, vcancel := context.WithTimeout(ctx, 1*time.Second)
+		defer vcancel()
+		conn, err := dialer.ContextDialer(vctx, "unix://"+vAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to image verification plugin: %w", err)
+		}
+		defer conn.Close()
+		client := imageverifier.NewImageVerifierClient(ttrpc.NewClient(conn))
+		resolver = NewVerifyingResolver(resolver, client)
+	}
 
 	labels := c.getLabels(ctx, ref)
 
