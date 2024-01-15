@@ -265,6 +265,17 @@ type ImagePlatform struct {
 	Snapshotter string `toml:"snapshotter" json:"snapshotter"`
 }
 
+// ImageVerification contains configuration related to runtime verification of
+// container images.
+type ImageVerification struct {
+	// Address specifies address of the TTRPC plugin handing image verification
+	// requests.
+	//
+	// Details of field usage can be found in:
+	// https://github.com/containerd/containerd/tree/main/docs/cri/config.md
+	Address string `toml:"address" json:"address"`
+}
+
 type ImageConfig struct {
 	// Snapshotter is the snapshotter used by containerd.
 	Snapshotter string `toml:"snapshotter" json:"snapshotter"`
@@ -322,6 +333,9 @@ type ImageConfig struct {
 
 	// StatsCollectPeriod is the period (in seconds) of snapshots stats collection.
 	StatsCollectPeriod int `toml:"stats_collect_period" json:"statsCollectPeriod"`
+
+	// ImageVerification contains config related to runtime verification of container images
+	ImageVerification `toml:"image_verification" json:"imageVerification"`
 }
 
 // RuntimeConfig contains toml config related to CRI plugin,
