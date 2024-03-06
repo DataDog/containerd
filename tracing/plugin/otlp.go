@@ -165,14 +165,62 @@ func newTracer(ctx context.Context, config *TraceConfig, procs []trace.SpanProce
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
-	sampler := trace.ParentBased(trace.TraceIDRatioBased(config.TraceSamplingRatio))
+	//sampler := trace.ParentBased(trace.TraceIDRatioBased(config.TraceSamplingRatio))
 
 	opts := []trace.TracerProviderOption{
-		trace.WithSampler(sampler),
 		trace.WithResource(res),
 		trace.WithSampler(&readSampling{
 			drop: map[string]struct{}{
+				"containerd.services.containers.v1.Containers/Get":        {},
+				"containerd.services.leases.v1.Leases/Delete":             {},
+				"containerd.services.containers.v1.Containers/ListStream": {},
+				"containerd.services.content.v1.Content/Info":             {},
+				"containerd.services.content.v1.Content/Read":             {},
+				"containerd.services.content.v1.Content/Write":            {},
+				"containerd.services.events.v1.Events/Subscribe":          {},
+				"containerd.services.images.v1.Images/Get":                {},
+				"containerd.services.images.v1.Images/List":               {},
+				"containerd.services.namespaces.v1.Namespaces/Get":        {},
+				"containerd.services.namespaces.v1.Namespaces/List":       {},
+				"containerd.services.snapshots.v1.Snapshots/Stat":         {},
+				"containerd.services.tasks.v1.Tasks/Get":                  {},
+				"containerd.services.tasks.v1.Tasks/ListPids":             {},
+				"containerd.services.version.v1.Version/Version":          {},
+				"pkg.cri.server.ImageFsInfo":                              {},
+				"pkg.cri.server.ImageStatus":                              {},
+				"pkg.cri.server.ListImages":                               {},
+				//"pkg.cri.server.PullImage": {},
+				//"pkg.unpack.unpacker.UnpackHandler": {},
+				//"pkg.unpack.unpacker.fetchLayer": {},
+				//"pkg.unpack.unpacker.unpack": {},
+				//"pkg.unpack.unpacker.unpackLayer": {},
+				//"pull.Pull": {},
+				//"pull.UnpackWait": {},
+				//"pull.fetch": {},
+				//"pull.pull.createNewImage": {},
+				//"remotes.docker.resolver.HTTPRequest": {},
 				"runtime.v1.ImageService/ImageFsInfo": {},
+				"runtime.v1.ImageService/ImageStatus": {},
+				"runtime.v1.ImageService/ListImages":  {},
+				//"runtime.v1.ImageService/PullImage": {},
+				"runtime.v1.RuntimeService/ContainerStatus": {},
+				//"runtime.v1.RuntimeService/CreateContainer": {},
+				"runtime.v1.RuntimeService/ExecSync":           {},
+				"runtime.v1.RuntimeService/ListContainerStats": {},
+				"runtime.v1.RuntimeService/ListContainers":     {},
+				"runtime.v1.RuntimeService/ListPodSandbox":     {},
+				"runtime.v1.RuntimeService/PodSandboxStatus":   {},
+				//"runtime.v1.RuntimeService/RemoveContainer": {},
+				//"runtime.v1.RuntimeService/RemovePodSandbox": {},
+				//"runtime.v1.RuntimeService/RunPodSandbox": {},
+				//"runtime.v1.RuntimeService/StartContainer": {},
+				"runtime.v1.RuntimeService/Status": {},
+				//"runtime.v1.RuntimeService/StopContainer":            {},
+				//"runtime.v1.RuntimeService/StopPodSandbox":           {},
+				"runtime.v1.RuntimeService/UpdateContainerResources": {},
+				"runtime.v1.RuntimeService/Version":                  {},
+				"runtime.v1alpha2.RuntimeService/ListPodSandbox":     {},
+				"runtime.v1alpha2.RuntimeService/PodSandboxStatus":   {},
 			},
 		}),
 	}
@@ -212,9 +260,8 @@ func (s *readSampling) ShouldSample(p trace.SamplingParameters) trace.SamplingRe
 			Decision: trace.Drop,
 		}
 	}
-	println(p.Name)
 	return trace.SamplingResult{
-		Decision: trace.RecordOnly,
+		Decision: trace.RecordAndSample,
 	}
 }
 
