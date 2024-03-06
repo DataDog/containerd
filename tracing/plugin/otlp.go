@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/containerd/containerd/errdefs"
@@ -169,6 +170,11 @@ func newTracer(ctx context.Context, config *TraceConfig, procs []trace.SpanProce
 	opts := []trace.TracerProviderOption{
 		trace.WithSampler(sampler),
 		trace.WithResource(res),
+		trace.WithSampler(&readSampling{
+			drop: map[string]struct{}{
+				"runtime.v1.ImageService/ImageFsInfo": {},
+			},
+		}),
 	}
 
 	for _, proc := range procs {
@@ -190,6 +196,30 @@ func newTracer(ctx context.Context, config *TraceConfig, procs []trace.SpanProce
 		return nil
 	}}, nil
 
+}
+
+type readSampling struct {
+	sync.Mutex
+	drop map[string]struct{}
+}
+
+func (s *readSampling) ShouldSample(p trace.SamplingParameters) trace.SamplingResult {
+	s.Lock()
+	_, ok := s.drop[p.Name]
+	s.Unlock()
+	if ok {
+		return trace.SamplingResult{
+			Decision: trace.Drop,
+		}
+	}
+	println(p.Name)
+	return trace.SamplingResult{
+		Decision: trace.RecordOnly,
+	}
+}
+
+func (s *readSampling) Description() string {
+	return "readSampling"
 }
 
 // Returns a composite TestMap propagator
