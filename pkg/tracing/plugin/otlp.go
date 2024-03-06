@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/containerd/containerd/v2/pkg/deprecation"
@@ -193,13 +194,42 @@ func newTracer(ctx context.Context, procs []trace.SpanProcessor) (io.Closer, err
 	for _, proc := range procs {
 		opts = append(opts, trace.WithSpanProcessor(proc))
 	}
+	opts = append(opts, trace.WithSampler(&readSampling{
+		drop: map[string]struct{}{
+			"runtime.v1.ImageService/ImageFsInfo": {},
+		},
+	},
+	))
 	provider := trace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(provider)
 
 	return closerFunc(func() error {
 		return provider.Shutdown(ctx)
 	}), nil
+}
 
+type readSampling struct {
+	sync.Mutex
+	drop map[string]struct{}
+}
+
+func (s *readSampling) ShouldSample(p trace.SamplingParameters) trace.SamplingResult {
+	s.Lock()
+	_, ok := s.drop[p.Name]
+	s.Unlock()
+	if ok {
+		return trace.SamplingResult{
+			Decision: trace.Drop,
+		}
+	}
+	println(p.Name)
+	return trace.SamplingResult{
+		Decision: trace.RecordOnly,
+	}
+}
+
+func (s *readSampling) Description() string {
+	return "readSampling"
 }
 
 func warnTraceConfig(ic *plugin.InitContext) error {
