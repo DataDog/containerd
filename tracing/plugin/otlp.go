@@ -161,6 +161,7 @@ func newTracer(ctx context.Context, config *TraceConfig, procs []trace.SpanProce
 			// Service name used to displace traces in backends
 			semconv.ServiceNameKey.String(config.ServiceName),
 		),
+		resource.WithFromEnv(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
