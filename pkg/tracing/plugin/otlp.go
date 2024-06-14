@@ -38,6 +38,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 )
 
 const exporterPlugin = "otlp"
@@ -193,6 +194,11 @@ func newTracer(ctx context.Context, procs []trace.SpanProcessor) (io.Closer, err
 	for _, proc := range procs {
 		opts = append(opts, trace.WithSpanProcessor(proc))
 	}
+
+	attributes := map[string][]string{
+		string(semconv.RPCMethodKey): {"PullImage", "Create"},
+	}
+	opts = append(opts, trace.WithSampler(trace.ParentBased(AttributeBased(attributes))))
 	provider := trace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(provider)
 
