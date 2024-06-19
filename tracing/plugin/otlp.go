@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/containerd/containerd/errdefs"
@@ -101,6 +102,7 @@ type OTLPConfig struct {
 type TraceConfig struct {
 	ServiceName        string  `toml:"service_name"`
 	TraceSamplingRatio float64 `toml:"sampling_ratio"`
+	AllowedNames       string  `toml:"allowed_names"`
 }
 
 type closer struct {
@@ -159,12 +161,23 @@ func newTracer(ctx context.Context, config *TraceConfig, procs []trace.SpanProce
 			// Service name used to displace traces in backends
 			semconv.ServiceNameKey.String(config.ServiceName),
 		),
+		resource.WithFromEnv(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
 	}
 
-	sampler := trace.ParentBased(trace.TraceIDRatioBased(config.TraceSamplingRatio))
+	if config.TraceSamplingRatio < 1 && config.AllowedNames == "" {
+		return nil, fmt.Errorf("only one of trace_sampling_ratio or allowed_names can be set")
+	}
+
+	var sampler trace.Sampler
+	if config.AllowedNames == "" {
+		sampler = trace.ParentBased(trace.TraceIDRatioBased(config.TraceSamplingRatio))
+	} else {
+		allowedNames := strings.Split(config.AllowedNames, ",")
+		sampler = trace.ParentBased(NameBased(allowedNames))
+	}
 
 	opts := []trace.TracerProviderOption{
 		trace.WithSampler(sampler),
