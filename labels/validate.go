@@ -28,8 +28,18 @@ const (
 	keyMaxLen = 64
 )
 
+// HACK (imeoer): we need to ignore the specified image
+// label kv length check for antgroup's old nydus images,
+// which have a label with 4k+ length.
+var ignoredKeys = []string{"containerd.io/snapshot/nydus-blob-ids"}
+
 // Validate a label's key and value are under 4096 bytes
 func Validate(k, v string) error {
+	for _, key := range ignoredKeys {
+		if k == key {
+			return nil
+		}
+	}
 	total := len(k) + len(v)
 	if total > maxSize {
 		if len(k) > keyMaxLen {
