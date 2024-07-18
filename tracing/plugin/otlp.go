@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/containerd/log"
@@ -238,12 +239,40 @@ func newTracer(ctx context.Context, procs []trace.SpanProcessor) (io.Closer, err
 	for _, proc := range procs {
 		opts = append(opts, trace.WithSpanProcessor(proc))
 	}
+
+	// Configure custom NameBased sampler if specified in the env
+	if nameSampler := nameSamplerFromEnv(); nameSampler != nil {
+		opts = append(opts, trace.WithSampler(nameSampler))
+		// Unset the env vars so that otel sdk does not attempt to configure the sampler automatically
+		os.Unsetenv(otelTracesSamplerEnv)
+		os.Unsetenv(otelTracesSamplerArgEnv)
+	}
+
 	provider := trace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(provider)
 
 	return closerFunc(func() error {
 		return provider.Shutdown(ctx)
 	}), nil
+}
+
+func nameSamplerFromEnv() trace.Sampler {
+	sampler, ok := os.LookupEnv(otelTracesSamplerEnv)
+	if !ok {
+		return nil
+	}
+
+	sampler = strings.ToLower(strings.TrimSpace(sampler))
+	allowedNames := strings.Split(strings.TrimSpace(os.Getenv(otelTracesSamplerArgEnv)), ",")
+
+	switch sampler {
+	case samplerNameBased:
+		return NameBased(allowedNames)
+	case samplerParentBasedName:
+		return trace.ParentBased(NameBased(allowedNames))
+	default:
+		return nil
+	}
 }
 
 func warnTraceConfig(ic *plugin.InitContext) error {
