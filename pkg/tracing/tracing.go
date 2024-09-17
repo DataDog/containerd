@@ -18,6 +18,7 @@ package tracing
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -25,6 +26,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -129,4 +131,12 @@ func Attribute(k string, v any) attribute.KeyValue {
 // specification for a span.
 func HTTPStatusCodeAttributes(code int) []attribute.KeyValue {
 	return []attribute.KeyValue{semconv.HTTPStatusCodeKey.Int(code)}
+}
+
+// GetPropagatorsTraceContext returns the current propagators trace context as a JSON string
+func GetPropagatorsTraceContext(ctx context.Context) ([]byte, error) {
+	propagator := propagation.TraceContext{}
+	carrier := propagation.MapCarrier{}
+	propagator.Inject(ctx, carrier)
+	return json.Marshal(carrier)
 }
