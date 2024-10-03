@@ -320,7 +320,9 @@ func (u *Unpacker) unpack(
 		for try := 1; try <= 3; try++ {
 			// Prepare snapshot with from parent, label as root
 			key = fmt.Sprintf(snapshots.UnpackKeyFormat, uniquePart(), chainID)
-			mounts, err = sn.Prepare(ctx, key, parent.String(), opts...)
+			prepareCtx, prepareSpan := tracing.StartSpan(ctx, tracing.Name(unpackSpanPrefix, "prepare"))
+			mounts, err = sn.Prepare(prepareCtx, key, parent.String(), opts...)
+			prepareSpan.End()
 			if err != nil {
 				if errdefs.IsAlreadyExists(err) {
 					if _, err := sn.Stat(ctx, chainID); err != nil {
@@ -379,8 +381,9 @@ func (u *Unpacker) unpack(
 			}
 		case <-fetchC[i-fetchOffset]:
 		}
-
-		diff, err := a.Apply(ctx, desc, mounts, unpack.ApplyOpts...)
+		applyCtx, applySpan := tracing.StartSpan(ctx, tracing.Name(unpackSpanPrefix, "apply"))
+		diff, err := a.Apply(applyCtx, desc, mounts, unpack.ApplyOpts...)
+		applySpan.End()
 		if err != nil {
 			cleanup.Do(ctx, abort)
 			return fmt.Errorf("failed to extract layer %s: %w", diffIDs[i], err)
@@ -389,8 +392,10 @@ func (u *Unpacker) unpack(
 			cleanup.Do(ctx, abort)
 			return fmt.Errorf("wrong diff id calculated on extraction %q", diffIDs[i])
 		}
-
-		if err = sn.Commit(ctx, chainID, key, opts...); err != nil {
+		commitCtx, commitSpan := tracing.StartSpan(ctx, tracing.Name(unpackSpanPrefix, "commit"))
+		err = sn.Commit(commitCtx, chainID, key, opts...)
+		commitSpan.End()
+		if err != nil {
 			cleanup.Do(ctx, abort)
 			if errdefs.IsAlreadyExists(err) {
 				return nil
