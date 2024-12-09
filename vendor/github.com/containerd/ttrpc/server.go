@@ -74,8 +74,17 @@ func (s *Server) RegisterService(name string, desc *ServiceDesc) {
 }
 
 func (s *Server) Serve(ctx context.Context, l net.Listener) error {
-	s.addListener(l)
+	s.mu.Lock()
+	s.addListenerLocked(l)
 	defer s.closeListener(l)
+
+	select {
+	case <-s.done:
+		s.mu.Unlock()
+		return ErrServerClosed
+	default:
+	}
+	s.mu.Unlock()
 
 	var (
 		backoff    time.Duration
@@ -188,9 +197,7 @@ func (s *Server) Close() error {
 	return err
 }
 
-func (s *Server) addListener(l net.Listener) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Server) addListenerLocked(l net.Listener) {
 	s.listeners[l] = struct{}{}
 }
 
@@ -564,7 +571,7 @@ var noopFunc = func() {}
 
 func getRequestContext(ctx context.Context, req *Request) (retCtx context.Context, cancel func()) {
 	if len(req.Metadata) > 0 {
-		md := MD{}
+		md := NewMD(make(map[string][]string))
 		md.fromRequest(req)
 		ctx = WithMetadata(ctx, md)
 	}
