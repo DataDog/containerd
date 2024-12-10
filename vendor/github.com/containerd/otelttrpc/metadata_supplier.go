@@ -59,8 +59,9 @@ func (s *metadataSupplier) Set(key string, value string) {
 }
 
 func (s *metadataSupplier) Keys() []string {
-	out := make([]string, 0, len(*s.metadata))
-	for key := range *s.metadata {
+	mCopy := s.metadata.GetCopy()
+	out := make([]string, 0, len(mCopy))
+	for key := range mCopy {
 		out = append(out, key)
 	}
 	return out
@@ -69,11 +70,11 @@ func (s *metadataSupplier) Keys() []string {
 func inject(ctx context.Context, propagators propagation.TextMapPropagator, req *ttrpc.Request) context.Context {
 	md, ok := ttrpc.GetMetadata(ctx)
 	if !ok {
-		md = make(ttrpc.MD)
+		md = ttrpc.NewMD(map[string][]string{})
 	}
 
 	propagators.Inject(ctx, &metadataSupplier{
-		metadata: &md,
+		metadata: md,
 	})
 
 	// keep non-conflicting metadata from req, update others from context
@@ -83,7 +84,7 @@ func inject(ctx context.Context, propagators propagation.TextMapPropagator, req 
 			newMD = append(newMD, kv)
 		}
 	}
-	for k, values := range md {
+	for k, values := range md.GetCopy() {
 		for _, v := range values {
 			newMD = append(newMD, &ttrpc.KeyValue{
 				Key:   k,
@@ -99,10 +100,10 @@ func inject(ctx context.Context, propagators propagation.TextMapPropagator, req 
 func extract(ctx context.Context, propagators propagation.TextMapPropagator) context.Context {
 	md, ok := ttrpc.GetMetadata(ctx)
 	if !ok {
-		md = make(ttrpc.MD)
+		md = ttrpc.NewMD(map[string][]string{})
 	}
 
 	return propagators.Extract(ctx, &metadataSupplier{
-		metadata: &md,
+		metadata: md,
 	})
 }

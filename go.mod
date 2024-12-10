@@ -151,3 +151,5 @@ require (
 )
 
 replace github.com/containerd/ttrpc v1.2.5 => github.com/just1not2/ttrpc v1.5.0
+
+replace github.com/containerd/otelttrpc v0.0.0-20240305015340-ea5083fda723 => github.com/just1not2/otelttrpc v1.5.1
