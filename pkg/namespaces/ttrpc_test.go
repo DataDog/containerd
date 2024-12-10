@@ -18,27 +18,8 @@ package namespaces
 
 import (
 	"context"
-	"reflect"
 	"testing"
-
-	"github.com/containerd/ttrpc"
 )
-
-func TestCopyTTRPCMetadata(t *testing.T) {
-	src := ttrpc.MD{}
-	src.Set("key", "a", "b", "c", "d")
-	md := copyMetadata(src)
-
-	if !reflect.DeepEqual(src, md) {
-		t.Fatalf("metadata is copied incorrectly")
-	}
-
-	slice, _ := src.Get("key")
-	slice[0] = "z"
-	if reflect.DeepEqual(src, md) {
-		t.Fatalf("metadata is copied incorrectly")
-	}
-}
 
 func TestTTRPCNamespaceHeader(t *testing.T) {
 	ctx := context.Background()
