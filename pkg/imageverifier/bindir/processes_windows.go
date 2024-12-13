@@ -29,7 +29,8 @@ import (
 )
 
 type process struct {
-	cmd *exec.Cmd
+	cmd  *exec.Cmd
+	pgid int
 
 	jobHandle     *windows.Handle
 	processHandle *windows.Handle

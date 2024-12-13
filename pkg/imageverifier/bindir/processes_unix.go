@@ -27,7 +27,8 @@ import (
 )
 
 type process struct {
-	cmd *exec.Cmd
+	cmd  *exec.Cmd
+	pgid int
 }
 
 // Configure the verifier command so that killing it kills all child
@@ -47,8 +48,14 @@ func startProcess(ctx context.Context, cmd *exec.Cmd) (*process, error) {
 		return nil, fmt.Errorf("starting process: %w", err)
 	}
 
+	pgid := -1
+	if cmd.SysProcAttr != nil {
+		pgid = cmd.SysProcAttr.Pgid
+	}
+
 	return &process{
-		cmd: cmd,
+		cmd:  cmd,
+		pgid: pgid,
 	}, nil
 }
 
