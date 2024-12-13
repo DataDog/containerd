@@ -114,6 +114,7 @@ func (v *ImageVerifier) VerifyImage(ctx context.Context, name string, desc ocisp
 func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName string, desc ocispec.Descriptor) (exitCode int, reason string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, tomlext.ToStdTime(v.config.PerVerifierTimeout))
 	defer cancel()
+	timeoutString := "start=" + time.Now().String()
 
 	binPath := filepath.Join(v.config.BinDir, bin)
 	args := []string{
@@ -171,6 +172,7 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 	if err != nil {
 		return -1, "", err
 	}
+	timeoutString += ";;;;;process=" + time.Now().String()
 	defer p.cleanup(ctx)
 
 	// Close the child ends of the pipes in the parent process.
@@ -261,7 +263,8 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 		if ee := (&exec.ExitError{}); errors.As(err, &ee) && ee.ProcessState.Exited() {
 			return ee.ProcessState.ExitCode(), reason, nil
 		}
-		return -1, "", fmt.Errorf("waiting on command to exit: %v", err)
+		timeoutString += ";;;;;end=" + time.Now().String()
+		return -1, "", fmt.Errorf("waiting on command to exit (%s): %v", timeoutString, err)
 	}
 
 	return cmd.ProcessState.ExitCode(), reason, nil
