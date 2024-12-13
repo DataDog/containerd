@@ -22,17 +22,19 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 )
 
 type process struct {
-	cmd *exec.Cmd
+	cmd  *exec.Cmd
+	pgid int
 }
 
 // Configure the verifier command so that killing it kills all child
 // processes of the verifier process.
-func startProcess(ctx context.Context, cmd *exec.Cmd) (*process, error) {
+func startProcess(ctx context.Context, cmd *exec.Cmd, s *string) (*process, error) {
 	// Assign the verifier a new process group so that killing its process group
 	// in Cancel() doesn't kill the parent process (containerd).
 	cmd.SysProcAttr = &unix.SysProcAttr{Setpgid: true}
@@ -40,6 +42,7 @@ func startProcess(ctx context.Context, cmd *exec.Cmd) (*process, error) {
 	cmd.Cancel = func() error {
 		// Passing a negative PID causes kill(2) to kill all processes in the
 		// process group whose ID is cmd.Process.Pid.
+		*s += "+++KILL=" + strconv.Itoa(cmd.Process.Pid) + ":" + strconv.Itoa(cmd.SysProcAttr.Pgid) + "+++"
 		return unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
 	}
 
@@ -47,8 +50,14 @@ func startProcess(ctx context.Context, cmd *exec.Cmd) (*process, error) {
 		return nil, fmt.Errorf("starting process: %w", err)
 	}
 
+	pgid := -1
+	if cmd.SysProcAttr != nil {
+		pgid = cmd.SysProcAttr.Pgid
+	}
+
 	return &process{
-		cmd: cmd,
+		cmd:  cmd,
+		pgid: pgid,
 	}, nil
 }
 

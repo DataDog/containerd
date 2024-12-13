@@ -29,7 +29,8 @@ import (
 )
 
 type process struct {
-	cmd *exec.Cmd
+	cmd  *exec.Cmd
+	pgid int
 
 	jobHandle     *windows.Handle
 	processHandle *windows.Handle
@@ -40,7 +41,7 @@ type process struct {
 //
 // Job/process management based on:
 // https://devblogs.microsoft.com/oldnewthing/20131209-00/?p=2433
-func startProcess(ctx context.Context, cmd *exec.Cmd) (*process, error) {
+func startProcess(ctx context.Context, cmd *exec.Cmd, _ *string) (*process, error) {
 	p := &process{
 		cmd: cmd,
 	}

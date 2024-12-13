@@ -114,6 +114,8 @@ func (v *ImageVerifier) VerifyImage(ctx context.Context, name string, desc ocisp
 func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName string, desc ocispec.Descriptor) (exitCode int, reason string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, tomlext.ToStdTime(v.config.PerVerifierTimeout))
 	defer cancel()
+	timeoutString := "start=" + time.Now().String()
+	additionalString := ""
 
 	binPath := filepath.Join(v.config.BinDir, bin)
 	args := []string{
@@ -161,22 +163,35 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 	// Close parent ends of pipes on timeout. Without this, I/O may hang in the
 	// parent process.
 	if d, ok := ctx.Deadline(); ok {
-		stdinWrite.SetDeadline(d)
-		stdoutRead.SetDeadline(d)
-		stderrRead.SetDeadline(d)
+		if err := stdinWrite.SetDeadline(d); err != nil {
+			timeoutString += ";;;;;ERR:stdinWrite.SetDeadline()=" + err.Error() + time.Now().String()
+		}
+		if err := stdoutRead.SetDeadline(d); err != nil {
+			timeoutString += ";;;;;ERR:stdoutRead.SetDeadline()=" + err.Error() + time.Now().String()
+		}
+		if err := stderrRead.SetDeadline(d); err != nil {
+			timeoutString += ";;;;;ERR:stderrRead.SetDeadline()=" + err.Error() + time.Now().String()
+		}
 	}
 
 	// Finish configuring, and then fork & exec the child process.
-	p, err := startProcess(ctx, cmd)
+	p, err := startProcess(ctx, cmd, &additionalString)
 	if err != nil {
 		return -1, "", err
 	}
+	timeoutString += ";;;;;process=" + time.Now().String()
 	defer p.cleanup(ctx)
 
 	// Close the child ends of the pipes in the parent process.
-	stdinRead.Close()
-	stdoutWrite.Close()
-	stderrWrite.Close()
+	if err := stdinRead.Close(); err != nil {
+		timeoutString += ";;;;;ERR:stdinRead.Close()=" + err.Error() + time.Now().String()
+	}
+	if err := stdoutWrite.Close(); err != nil {
+		timeoutString += ";;;;;ERR:stdoutWrite.Close()=" + err.Error() + time.Now().String()
+	}
+	if err := stderrWrite.Close(); err != nil {
+		timeoutString += ";;;;;ERR:stderrWrite.Close()=" + err.Error() + time.Now().String()
+	}
 
 	// Write the descriptor to stdin.
 	go func() {
@@ -193,7 +208,11 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 			// of stdin.
 			log.G(ctx).WithError(err).Warn("failed to completely write descriptor to stdin")
 		}
-		stdinWrite.Close()
+		timeoutString += ";;;;;stdinEncode=" + time.Now().String()
+		if err := stdinWrite.Close(); err != nil {
+			timeoutString += ";;;;;ERR:stdinWrite.Close()=" + err.Error() + time.Now().String()
+		}
+		timeoutString += ";;;;;stdinWriteClosed=" + time.Now().String()
 	}()
 
 	// Pipe verifier stderr lines to debug logs.
@@ -211,12 +230,16 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 		}
 
 		s := bufio.NewScanner(lr)
+		timeoutString += ";;;;;step1=" + time.Now().String()
 		for s.Scan() {
 			stderrLog.Debug(s.Text())
 		}
+		////////////////////// BLOCK //////////////////////
+		timeoutString += ";;;;;step2=" + time.Now().String()
 		if err := s.Err(); err != nil {
 			stderrLog.WithError(err).Debug("error logging image verifier stderr")
 		}
+		timeoutString += ";;;;;stderr1=" + time.Now().String()
 
 		if lr.N == 0 {
 			// Peek ahead to see if stderr reader was truncated.
@@ -232,14 +255,19 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 		if _, err := io.Copy(io.Discard, stderrRead); err != nil {
 			log.G(ctx).WithError(err).Error("error flushing stderr")
 		}
+		timeoutString += ";;;;;stderr2=" + time.Now().String()
 	}()
 
+	timeoutString += ";;;;;step3=" + time.Now().String()
 	stdout, err := io.ReadAll(io.LimitReader(stdoutRead, outputLimitBytes))
+	////////////////////// BLOCK //////////////////////
+	timeoutString += ";;;;;step4=" + time.Now().String()
 	if err != nil {
 		log.G(ctx).WithError(err).Error("error reading stdout")
 	} else {
 		m := strings.Builder{}
 		m.WriteString(strings.TrimSpace(string(stdout)))
+		timeoutString += ";;;;;step5=" + time.Now().String()
 		// Peek ahead to see if stdout is truncated.
 		b := make([]byte, 1)
 		if n, _ := stdoutRead.Read(b); n > 0 {
@@ -247,6 +275,7 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 		}
 		reason = m.String()
 	}
+	timeoutString += ";;;;;stdout1=" + time.Now().String()
 
 	// Discard the truncated part of stdout. Doing this rather than closing the
 	// reader avoids broken pipe errors. This is bounded by the stdoutRead
@@ -254,6 +283,7 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 	if _, err := io.Copy(io.Discard, stdoutRead); err != nil {
 		log.G(ctx).WithError(err).Error("error flushing stdout")
 	}
+	timeoutString += ";;;;;stdout2=" + time.Now().String()
 	stdoutRead.Close()
 
 	<-stderrLogDone
@@ -261,7 +291,9 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 		if ee := (&exec.ExitError{}); errors.As(err, &ee) && ee.ProcessState.Exited() {
 			return ee.ProcessState.ExitCode(), reason, nil
 		}
-		return -1, "", fmt.Errorf("waiting on command to exit: %v", err)
+		timeoutString += ";;;;;end=" + time.Now().String()
+		timeoutString += additionalString + "|"
+		return -1, "", fmt.Errorf("waiting on command to exit (%s): %v", timeoutString, err)
 	}
 
 	return cmd.ProcessState.ExitCode(), reason, nil
