@@ -18,6 +18,7 @@ package labels
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/containerd/containerd/errdefs"
 )
@@ -31,12 +32,12 @@ const (
 // HACK (imeoer): we need to ignore the specified image
 // label kv length check for antgroup's old nydus images,
 // which have a label with 4k+ length.
-var ignoredKeys = []string{"containerd.io/snapshot/nydus-blob-ids"}
+var ignoredKeyPrefixes = []string{"containerd.io/snapshot/nydus-blob-ids"}
 
 // Validate a label's key and value are under 4096 bytes
 func Validate(k, v string) error {
-	for _, key := range ignoredKeys {
-		if k == key {
+	for _, keyPrefix := range ignoredKeyPrefixes {
+		if strings.HasPrefix(k, keyPrefix) {
 			return nil
 		}
 	}
