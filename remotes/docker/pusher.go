@@ -248,7 +248,7 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 			}
 
 			q := lurl.Query()
-			q.Add("digest", desc.Digest.String())
+			q.Set("digest", desc.Digest.String())
 
 			req = p.request(*lhost, http.MethodPut)
 			req.header.Set("Content-Type", "application/octet-stream")
@@ -320,7 +320,7 @@ func (p dockerPusher) pushInChunked(ctx context.Context, desc ocispec.Descriptor
 				return
 			}
 			q := lurl.Query()
-			q.Add("digest", desc.Digest.String())
+			q.Set("digest", desc.Digest.String())
 			req := p.request(*lhost, http.MethodPut)
 			req.path = lurl.Path + "?" + q.Encode()
 			req.body = func() (io.ReadCloser, error) {
