@@ -30,9 +30,12 @@ const (
 )
 
 // HACK (imeoer): we need to ignore the specified image
-// label kv length check for antgroup's old nydus images,
-// which have a label with 4k+ length.
-var ignoredKeyPrefixes = []string{"containerd.io/snapshot/nydus-blob-ids"}
+// label kv length check for nydus / estargz images,
+// which have some labels with 4k+ length.
+var ignoredKeyPrefixes = []string{
+	"containerd.io/snapshot/nydus",
+	"containerd.io/snapshot/remote/stargz",
+}
 
 // Validate a label's key and value are under 4096 bytes
 func Validate(k, v string) error {
