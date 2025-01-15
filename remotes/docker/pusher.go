@@ -175,7 +175,7 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 		req.header.Add("Content-Type", desc.MediaType)
 	} else {
 		// Start upload request
-		req = p.request(host, http.MethodPost, "blobs", "uploads/", "?digest="+desc.Digest.String())
+		req = p.request(host, http.MethodPost, "blobs", "uploads/")
 
 		mountedFrom := ""
 		var resp *http.Response
