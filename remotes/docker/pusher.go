@@ -18,7 +18,6 @@ package docker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,6 +36,7 @@ import (
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/remotes"
 	remoteserrors "github.com/containerd/containerd/remotes/errors"
+	"github.com/pkg/errors"
 )
 
 type dockerPusher struct {
@@ -67,14 +67,19 @@ func (p dockerPusher) Writer(ctx context.Context, opts ...content.WriterOpt) (co
 	if wOpts.Ref == "" {
 		return nil, fmt.Errorf("ref must not be empty: %w", errdefs.ErrInvalidArgument)
 	}
-	return p.push(ctx, wOpts.Desc, wOpts.Ref, true)
+	return p.push(ctx, wOpts.Desc, nil, wOpts.Ref, true)
 }
 
 func (p dockerPusher) Push(ctx context.Context, desc ocispec.Descriptor) (content.Writer, error) {
-	return p.push(ctx, desc, remotes.MakeRefKey(ctx, desc), false)
+	return p.push(ctx, desc, nil, remotes.MakeRefKey(ctx, desc), false)
 }
 
-func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref string, unavailableOnFail bool) (content.Writer, error) {
+func (p dockerPusher) PusherInChunked(ctx context.Context, desc ocispec.Descriptor, rr remotes.RangeReader) error {
+	_, err := p.push(ctx, desc, rr, remotes.MakeRefKey(ctx, desc), false)
+	return err
+}
+
+func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, rr remotes.RangeReader, ref string, unavailableOnFail bool) (content.Writer, error) {
 	if l, ok := p.tracker.(StatusTrackLocker); ok {
 		l.Lock(ref)
 		defer l.Unlock(ref)
@@ -167,8 +172,6 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 		resp.Body.Close()
 	}
 
-	var pusher func() (*pushWriter, error)
-
 	if isManifest {
 		putPath := getManifestPath(p.object, desc.Digest)
 		req = p.request(host, http.MethodPut, putPath...)
@@ -238,9 +241,7 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 		}
 
 		if host.ChunkSize > 0 {
-			pusher = func() (*pushWriter, error) {
-				return p.pushInChunked(ctx, desc, ref, &host, resp)
-			}
+			return nil, p.pushInChunked(ctx, desc, rr, ref, &host, resp)
 		} else {
 			lurl, lhost, err := parseLocation(ctx, resp, &host)
 			if err != nil {
@@ -264,11 +265,7 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, ref str
 		},
 	})
 
-	if pusher == nil {
-		return p.pushInMonolithic(ctx, req, desc, ref, isManifest)
-	}
-
-	return pusher()
+	return p.pushInMonolithic(ctx, req, desc, ref, isManifest)
 }
 
 func (p dockerPusher) pushInMonolithic(ctx context.Context, req *request, desc ocispec.Descriptor, ref string, isManifest bool) (*pushWriter, error) {
@@ -302,52 +299,61 @@ func (p dockerPusher) pushInMonolithic(ctx context.Context, req *request, desc o
 	return pushw, nil
 }
 
-func (p dockerPusher) pushInChunked(ctx context.Context, desc ocispec.Descriptor, ref string, host *RegistryHost, resp *http.Response) (*pushWriter, error) {
-	pushw := newPushWriter(p.dockerBase, ref, desc.Digest, p.tracker, false)
-
+func (p dockerPusher) pushInChunked(ctx context.Context, desc ocispec.Descriptor, rr remotes.RangeReader, ref string, host *RegistryHost, resp *http.Response) error {
 	chunks := splitChunks(desc.Size, host.ChunkSize)
-	pr, pw := io.Pipe()
-	pushw.setPipe(pw)
 
-	go func() {
-		for idx, c := range chunks {
-			last := idx == len(chunks)-1
-
-			lurl, lhost, err := parseLocation(ctx, resp, host)
-			if err != nil {
-				pushw.setError(err)
-				pushw.Close()
-				return
-			}
-			q := lurl.Query()
-			q.Set("digest", desc.Digest.String())
-			req := p.request(*lhost, http.MethodPut)
-			req.path = lurl.Path + "?" + q.Encode()
-			req.body = func() (io.ReadCloser, error) {
-				if last {
-					return pr, nil
-				}
-				return io.NopCloser(io.LimitReader(pr, c.size)), nil
-			}
-			req.size = c.size
-			if last {
-				req.method = http.MethodPut
-			} else {
-				req.method = http.MethodPatch
-			}
-			req.header.Set("Content-Type", "application/octet-stream")
-			req.header.Set("Content-Range", fmt.Sprintf("%d-%d", c.offset, c.offset+c.size-1))
-			req.header.Set("Content-Length", fmt.Sprintf("%d", c.size))
-
-			resp, err = doPush(ctx, pushw, req)
-			if err != nil {
-				return
-			}
+	pushChunk := func(ctx context.Context, c chunk, last bool) error {
+		lurl, lhost, err := parseLocation(ctx, resp, host)
+		if err != nil {
+			return err
 		}
-		pushw.setResponse(resp)
-	}()
 
-	return pushw, nil
+		req := p.request(*lhost, http.MethodPut)
+		req.body = func() (io.ReadCloser, error) {
+			return rr.Reader(c.offset, c.size)
+		}
+		req.size = c.size
+
+		q := lurl.Query()
+		if last {
+			q.Set("digest", desc.Digest.String())
+			req.method = http.MethodPut
+		} else {
+			q.Set("digest", desc.Digest.String())
+			req.method = http.MethodPatch
+		}
+		req.path = lurl.Path + "?" + q.Encode()
+		req.header.Set("Content-Type", "application/octet-stream")
+		req.header.Set("Content-Range", fmt.Sprintf("%d-%d", c.offset, c.offset+c.size-1))
+		req.header.Set("Content-Length", fmt.Sprintf("%d", c.size))
+
+		resp, err = req.doWithRetries(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+
+		switch resp.StatusCode {
+		case http.StatusOK, http.StatusCreated, http.StatusNoContent, http.StatusAccepted:
+		default:
+			err = remoteserrors.NewUnexpectedStatusErr(resp)
+			log.G(ctx).WithField("resp", resp).WithField("body", string(err.(remoteserrors.ErrUnexpectedStatus).Body)).Debug("unexpected response")
+		}
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	for idx, c := range chunks {
+		if err := pushChunk(ctx, c, idx == len(chunks)-1); err != nil {
+			return errors.Wrapf(err, "push blob %s in chunked: number %d, offset %d, size %d",
+				desc.Digest, c.number, c.offset, c.size)
+		}
+	}
+
+	return nil
 }
 
 func doPush(ctx context.Context, pushw *pushWriter, req *request) (*http.Response, error) {
