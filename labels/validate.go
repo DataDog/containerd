@@ -16,13 +16,6 @@
 
 package labels
 
-import (
-	"fmt"
-	"strings"
-
-	"github.com/containerd/containerd/errdefs"
-)
-
 const (
 	maxSize = 4096
 	// maximum length of key portion of error message if len of key + len of value > maxSize
@@ -32,24 +25,7 @@ const (
 // HACK (imeoer): we need to ignore the specified image
 // label kv length check for nydus / estargz images,
 // which have some labels with 4k+ length.
-var ignoredKeyPrefixes = []string{
-	"containerd.io/snapshot/nydus",
-	"containerd.io/snapshot/remote/stargz",
-}
-
 // Validate a label's key and value are under 4096 bytes
 func Validate(k, v string) error {
-	for _, keyPrefix := range ignoredKeyPrefixes {
-		if strings.HasPrefix(k, keyPrefix) {
-			return nil
-		}
-	}
-	total := len(k) + len(v)
-	if total > maxSize {
-		if len(k) > keyMaxLen {
-			k = k[:keyMaxLen]
-		}
-		return fmt.Errorf("label key and value length (%d bytes) greater than maximum size (%d bytes), key: %s: %w", total, maxSize, k, errdefs.ErrInvalidArgument)
-	}
 	return nil
 }
