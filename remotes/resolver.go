@@ -50,6 +50,8 @@ type Resolver interface {
 	// to push the same blob using the Ingester API should result in ErrUnavailable.
 	Pusher(ctx context.Context, ref string) (Pusher, error)
 
+	// PusherInChunked returns a new pusher for the provided reference
+	// The returned PusherInChunked can push content in chunked.
 	PusherInChunked(ctx context.Context, ref string) (PusherInChunked, error)
 }
 
@@ -77,12 +79,14 @@ type Pusher interface {
 	Push(ctx context.Context, d ocispec.Descriptor) (content.Writer, error)
 }
 
-type RangeReader interface {
+// RangeReadCloser fetches a range of content.
+type RangeReadCloser interface {
 	Reader(offset int64, size int64) (io.ReadCloser, error)
 }
 
+// PusherInChunked pushes content in chunked.
 type PusherInChunked interface {
-	PusherInChunked(ctx context.Context, d ocispec.Descriptor, rr RangeReader) error
+	PushInChunked(ctx context.Context, d ocispec.Descriptor, rr RangeReadCloser) error
 }
 
 // FetcherFunc allows package users to implement a Fetcher with just a

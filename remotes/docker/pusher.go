@@ -74,12 +74,12 @@ func (p dockerPusher) Push(ctx context.Context, desc ocispec.Descriptor) (conten
 	return p.push(ctx, desc, nil, remotes.MakeRefKey(ctx, desc), false)
 }
 
-func (p dockerPusher) PusherInChunked(ctx context.Context, desc ocispec.Descriptor, rr remotes.RangeReader) error {
+func (p dockerPusher) PushInChunked(ctx context.Context, desc ocispec.Descriptor, rr remotes.RangeReadCloser) error {
 	_, err := p.push(ctx, desc, rr, remotes.MakeRefKey(ctx, desc), false)
 	return err
 }
 
-func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, rr remotes.RangeReader, ref string, unavailableOnFail bool) (content.Writer, error) {
+func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, rr remotes.RangeReadCloser, ref string, unavailableOnFail bool) (content.Writer, error) {
 	if l, ok := p.tracker.(StatusTrackLocker); ok {
 		l.Lock(ref)
 		defer l.Unlock(ref)
@@ -299,7 +299,7 @@ func (p dockerPusher) pushInMonolithic(ctx context.Context, req *request, desc o
 	return pushw, nil
 }
 
-func (p dockerPusher) pushInChunked(ctx context.Context, desc ocispec.Descriptor, rr remotes.RangeReader, ref string, host *RegistryHost, resp *http.Response) error {
+func (p dockerPusher) pushInChunked(ctx context.Context, desc ocispec.Descriptor, rr remotes.RangeReadCloser, ref string, host *RegistryHost, resp *http.Response) error {
 	chunks := splitChunks(desc.Size, host.ChunkSize)
 
 	pushChunk := func(ctx context.Context, c chunk, last bool) error {
