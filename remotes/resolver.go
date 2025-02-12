@@ -86,6 +86,7 @@ type RangeReadCloser interface {
 
 // PusherInChunked pushes content in chunked.
 type PusherInChunked interface {
+	Pusher
 	PushInChunked(ctx context.Context, d ocispec.Descriptor, rr RangeReadCloser) error
 }
 
