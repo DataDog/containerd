@@ -240,8 +240,8 @@ func (p dockerPusher) push(ctx context.Context, desc ocispec.Descriptor, rr remo
 			return nil, err
 		}
 
-		if host.ChunkSize > 0 {
-			return nil, p.pushInChunked(ctx, desc, rr, ref, &host, resp)
+		if host.ChunkSize > 0 && rr != nil {
+			return nil, p.pushInChunked(ctx, desc, rr, &host, resp)
 		} else {
 			lurl, lhost, err := parseLocation(ctx, resp, &host)
 			if err != nil {
@@ -299,7 +299,7 @@ func (p dockerPusher) pushInMonolithic(ctx context.Context, req *request, desc o
 	return pushw, nil
 }
 
-func (p dockerPusher) pushInChunked(ctx context.Context, desc ocispec.Descriptor, rr remotes.RangeReadCloser, ref string, host *RegistryHost, resp *http.Response) error {
+func (p dockerPusher) pushInChunked(ctx context.Context, desc ocispec.Descriptor, rr remotes.RangeReadCloser, host *RegistryHost, resp *http.Response) error {
 	chunks := splitChunks(desc.Size, host.ChunkSize)
 
 	pushChunk := func(ctx context.Context, c chunk, last bool) error {
