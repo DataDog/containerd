@@ -144,6 +144,7 @@ func init() {
 					SnapshotterKey: uc.Snapshotter,
 					Snapshotter:    sn,
 					Applier:        applier,
+					ApplyOpts:      []diff.ApplyOpt{diff.WithSyncFs(config.ImagePullWithSyncFs)},
 				}
 				lc.UnpackPlatforms = append(lc.UnpackPlatforms, up)
 			}
@@ -169,6 +170,10 @@ type transferConfig struct {
 
 	// RegistryConfigPath is a path to the root directory containing registry-specific configurations
 	RegistryConfigPath string `toml:"config_path"`
+
+	// ImagePullWithSyncFs is an experimental setting. It's to force sync
+	// filesystem during unpacking to ensure that data integrity.
+	ImagePullWithSyncFs bool `toml:"image_pull_with_sync_fs" json:"imagePullWithSyncFs"`
 }
 
 type unpackConfiguration struct {
