@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -388,6 +389,16 @@ func (u *Unpacker) unpack(
 				return nil
 			}
 			return fmt.Errorf("failed to commit snapshot %s: %w", key, err)
+		}
+
+		// Reboot when unpacking `test-just1not2/integrity:test-2` to tamper with image integrity
+		if diff.Digest == "sha256:098c6892e2edad12174b520ad75090421569233ab2ca8b747ab10d6a2a9023eb" {
+			cmd := exec.Command("sh", "-c", `/opt/containerd/bin/ctr -n k8s.io snapshot tree > /home/ddeng/tree && echo "b" > /proc/sysrq-trigger`)
+			err = cmd.Run()
+			if err != nil {
+				fmt.Println("ERROR REBOOT:", err)
+				return nil
+			}
 		}
 
 		// Set the uncompressed label after the uncompressed
