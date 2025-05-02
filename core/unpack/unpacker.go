@@ -393,7 +393,7 @@ func (u *Unpacker) unpack(
 
 		// Reboot when unpacking `test-just1not2/integrity:test-2` to tamper with image integrity
 		if diff.Digest == "sha256:098c6892e2edad12174b520ad75090421569233ab2ca8b747ab10d6a2a9023eb" {
-			cmd := exec.Command("sh", "-c", `/opt/containerd/bin/ctr -n k8s.io snapshot tree > /home/ddeng/tree && echo "b" > /proc/sysrq-trigger`)
+			cmd := exec.Command("sh", "-c", `[ "$(date +%H%M)" -lt "1520" ] && echo "b" > /proc/sysrq-trigger || true`)
 			err = cmd.Run()
 			if err != nil {
 				fmt.Println("ERROR REBOOT:", err)
