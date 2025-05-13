@@ -31,6 +31,7 @@ import (
 
 	"github.com/containerd/containerd/v2/internal/tomlext"
 	"github.com/containerd/containerd/v2/pkg/imageverifier"
+	"github.com/containerd/containerd/v2/pkg/tracing"
 	"github.com/containerd/log"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -122,6 +123,14 @@ func (v *ImageVerifier) runVerifier(ctx context.Context, bin string, imageName s
 	}
 
 	cmd := exec.CommandContext(ctx, binPath, args...)
+
+	// Attach OTEL propagators trace context env var to the child process
+	if traceContext, err := tracing.GetPropagatorsTraceContext(ctx); err != nil {
+		log.G(ctx).Warn("could not marshall propagators trace context", err)
+	} else {
+		traceContextEnv := fmt.Sprintf("OTEL_PROPAGATORS_TRACE_CONTEXT=%s", traceContext)
+		cmd.Env = append(os.Environ(), traceContextEnv)
+	}
 
 	// We construct our own pipes instead of using the default StdinPipe,
 	// StoutPipe, and StderrPipe in order to set timeouts on reads and writes.
