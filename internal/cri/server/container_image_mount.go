@@ -34,6 +34,13 @@ import (
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
+func dirExists(path string) bool {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
+
 func (c *criService) mutateMounts(
 	ctx context.Context,
 	extraMounts []*runtime.Mount,
@@ -107,8 +114,9 @@ func (c *criService) mutateImageMount(
 	// Paths for overlay components
 	target := c.getImageVolumeHostPath(sandboxID, imageID+"-overlay")
 	lowerDir := c.getImageVolumeHostPath(sandboxID, imageID+"-lower")
-	upperDir := c.getImageVolumeHostPath(sandboxID, imageID+"-upper")
-	workDir := c.getImageVolumeHostPath(sandboxID, imageID+"-work")
+	// Use /dev/shm for upper/work directories for in-memory performance
+	upperDir := filepath.Join("/dev/shm/containerd-image-volumes", sandboxID, imageID+"-upper")
+	workDir := filepath.Join("/dev/shm/containerd-image-volumes", sandboxID, imageID+"-work")
 
 	// Already mounted in another container on the same pod
 	mounted, err := ensureImageVolumeMounted(target)
@@ -161,104 +169,58 @@ func (c *criService) mutateImageMount(
 		return fmt.Errorf("failed to create lower dir %q: %w", lowerDir, err)
 	}
 	mounts = addVolatileOptionOnImageVolumeMount(mounts)
+	log.G(ctx).Infof("POC DEBUG: About to mount snapshot to lower dir %s with %d mounts", lowerDir, len(mounts))
 	if err := mount.All(mounts, lowerDir); err != nil {
 		return fmt.Errorf("failed to mount lower layer %q: %w", lowerDir, err)
 	}
+	log.G(ctx).Infof("POC DEBUG: Successfully mounted lower layer %s", lowerDir)
 	defer func() {
 		if retErr != nil {
 			_ = mount.UnmountAll(lowerDir, 0)
 		}
 	}()
 	
-	// Get image size to determine tmpfs size
-	imageSize, err := containerdImage.Size(ctx)
-	if err != nil {
-		log.G(ctx).WithError(err).Warnf("failed to get image size, using default")
-		imageSize = 512 * 1024 * 1024 // Default to 512MB
-	}
-	
-	// Use 4x image size for tmpfs, with reasonable min/max bounds
-	tmpfsSize := imageSize * 4
-	minSize := int64(256 * 1024 * 1024)     // 256MB minimum
-	maxSize := int64(32 * 1024 * 1024 * 1024) // 32GB maximum
-	
-	if tmpfsSize < minSize {
-		tmpfsSize = minSize
-	}
-	if tmpfsSize > maxSize {
-		tmpfsSize = maxSize
-	}
-	
-	// Create and mount tmpfs for upper and work directories
+	// Create upper and work directories in /dev/shm for in-memory performance
+	log.G(ctx).Infof("POC DEBUG: Creating /dev/shm directories - upper: %s, work: %s", upperDir, workDir)
 	if err := os.MkdirAll(upperDir, 0755); err != nil {
 		return fmt.Errorf("failed to create upper dir %q: %w", upperDir, err)
 	}
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return fmt.Errorf("failed to create work dir %q: %w", workDir, err)
 	}
-	
-	tmpfsMount := mount.Mount{
-		Type:    "tmpfs",
-		Source:  "tmpfs",
-		Options: []string{
-			fmt.Sprintf("size=%d", tmpfsSize),
-			"mode=0755",
-		},
-	}
-	
-	if err := tmpfsMount.Mount(upperDir); err != nil {
-		return fmt.Errorf("failed to mount tmpfs on upper dir %q: %w", upperDir, err)
-	}
+	log.G(ctx).Infof("POC DEBUG: Created /dev/shm directories successfully")
 	defer func() {
 		if retErr != nil {
-			_ = mount.UnmountAll(upperDir, 0)
+			_ = os.RemoveAll(upperDir)
+			_ = os.RemoveAll(workDir)
 		}
 	}()
-	
-	if err := tmpfsMount.Mount(workDir); err != nil {
-		return fmt.Errorf("failed to mount tmpfs on work dir %q: %w", workDir, err)
-	}
-	defer func() {
-		if retErr != nil {
-			_ = mount.UnmountAll(workDir, 0)
-		}
-	}()
-	
-	// Create actual overlay directories within the tmpfs mounts
-	// Overlay needs empty directories, not the mount points themselves
-	upperOverlayDir := filepath.Join(upperDir, "overlay")
-	workOverlayDir := filepath.Join(workDir, "overlay")
-	
-	if err := os.MkdirAll(upperOverlayDir, 0755); err != nil {
-		return fmt.Errorf("failed to create overlay dir in tmpfs upper %q: %w", upperOverlayDir, err)
-	}
-	if err := os.MkdirAll(workOverlayDir, 0755); err != nil {
-		return fmt.Errorf("failed to create overlay dir in tmpfs work %q: %w", workOverlayDir, err)
-	}
-	
-	log.G(ctx).Infof("POC: Mounted tmpfs overlay (size: %dMB) for image volume at %s", tmpfsSize/(1024*1024), target)
 	if err := os.MkdirAll(target, 0755); err != nil {
 		return fmt.Errorf("failed to create target dir %q: %w", target, err)
 	}
 	
-	// Mount overlay filesystem using subdirectories within tmpfs
+	// Mount overlay filesystem using /dev/shm directories
+	overlayOpts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDir, upperDir, workDir)
+	log.G(ctx).Infof("POC DEBUG: Mounting overlay with opts: %s", overlayOpts)
 	overlayMount := mount.Mount{
 		Type:    "overlay",
 		Source:  "overlay",
-		Options: []string{
-			fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDir, upperOverlayDir, workOverlayDir),
-		},
+		Options: []string{overlayOpts},
 	}
 	
 	if err := overlayMount.Mount(target); err != nil {
+		log.G(ctx).Errorf("POC DEBUG: Overlay mount failed - lower exists: %v, upper exists: %v, work exists: %v", 
+			dirExists(lowerDir), dirExists(upperDir), dirExists(workDir))
 		return fmt.Errorf("failed to mount writable overlay at %q: %w", target, err)
 	}
 	
-	log.G(ctx).Infof("POC: Mounted writable overlay for image volume at %s", target)
+	log.G(ctx).Infof("POC DEBUG: Successfully mounted overlay at %s", target)
 	
 	extraMount.HostPath = target
 	// POC: Mark mount as writable
+	log.G(ctx).Infof("POC DEBUG: Setting extraMount.Readonly = false (was %v)", extraMount.GetReadonly())
 	extraMount.Readonly = false
+	log.G(ctx).Infof("POC DEBUG: Final mount - HostPath: %s, Readonly: %v", extraMount.HostPath, extraMount.Readonly)
 	return nil
 }
 
