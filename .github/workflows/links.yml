@@ -14,7 +14,6 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    if: github.repository == 'containerd/containerd'
     name: lychee
     timeout-minutes: 15
     steps:

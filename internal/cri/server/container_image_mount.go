@@ -140,24 +140,23 @@ func (c *criService) mutateImageMount(
 
 	s := c.client.SnapshotService(snapshotter)
 	
-	// POC: Prepare snapshot for lower layer
-	snapshotKey := fmt.Sprintf("%s-lower-%s", sandboxID, imageID)
-	mounts, err := s.Prepare(ctx, snapshotKey, chainID)
+	// Prepare snapshot for lower directory with lowerDir as the key
+	mounts, err := s.Prepare(ctx, lowerDir, chainID)
 	if err != nil {
 		if errdefs.IsAlreadyExists(err) {
-			mounts, err = s.Mounts(ctx, snapshotKey)
+			mounts, err = s.Mounts(ctx, lowerDir)
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("failed to prepare snapshot for image volume %q: %w", ref, err)
+		return fmt.Errorf("failed to prepare for image volume %q: %w", ref, err)
 	}
 	defer func() {
 		if retErr != nil {
-			_ = s.Remove(ctx, snapshotKey)
+			_ = s.Remove(ctx, lowerDir)
 		}
 	}()
 	
-	// Mount the lower layer
+	// Mount the snapshot to the lower layer (this puts the image content there)
 	if err := os.MkdirAll(lowerDir, 0755); err != nil {
 		return fmt.Errorf("failed to create lower dir %q: %w", lowerDir, err)
 	}
@@ -171,23 +170,83 @@ func (c *criService) mutateImageMount(
 		}
 	}()
 	
-	// Create upper and work directories for overlay
+	// Get image size to determine tmpfs size
+	imageSize, err := containerdImage.Size(ctx)
+	if err != nil {
+		log.G(ctx).WithError(err).Warnf("failed to get image size, using default")
+		imageSize = 512 * 1024 * 1024 // Default to 512MB
+	}
+	
+	// Use 4x image size for tmpfs, with reasonable min/max bounds
+	tmpfsSize := imageSize * 4
+	minSize := int64(256 * 1024 * 1024)     // 256MB minimum
+	maxSize := int64(32 * 1024 * 1024 * 1024) // 32GB maximum
+	
+	if tmpfsSize < minSize {
+		tmpfsSize = minSize
+	}
+	if tmpfsSize > maxSize {
+		tmpfsSize = maxSize
+	}
+	
+	// Create and mount tmpfs for upper and work directories
 	if err := os.MkdirAll(upperDir, 0755); err != nil {
 		return fmt.Errorf("failed to create upper dir %q: %w", upperDir, err)
 	}
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return fmt.Errorf("failed to create work dir %q: %w", workDir, err)
 	}
+	
+	tmpfsMount := mount.Mount{
+		Type:    "tmpfs",
+		Source:  "tmpfs",
+		Options: []string{
+			fmt.Sprintf("size=%d", tmpfsSize),
+			"mode=0755",
+		},
+	}
+	
+	if err := tmpfsMount.Mount(upperDir); err != nil {
+		return fmt.Errorf("failed to mount tmpfs on upper dir %q: %w", upperDir, err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = mount.UnmountAll(upperDir, 0)
+		}
+	}()
+	
+	if err := tmpfsMount.Mount(workDir); err != nil {
+		return fmt.Errorf("failed to mount tmpfs on work dir %q: %w", workDir, err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = mount.UnmountAll(workDir, 0)
+		}
+	}()
+	
+	// Create actual overlay directories within the tmpfs mounts
+	// Overlay needs empty directories, not the mount points themselves
+	upperOverlayDir := filepath.Join(upperDir, "overlay")
+	workOverlayDir := filepath.Join(workDir, "overlay")
+	
+	if err := os.MkdirAll(upperOverlayDir, 0755); err != nil {
+		return fmt.Errorf("failed to create overlay dir in tmpfs upper %q: %w", upperOverlayDir, err)
+	}
+	if err := os.MkdirAll(workOverlayDir, 0755); err != nil {
+		return fmt.Errorf("failed to create overlay dir in tmpfs work %q: %w", workOverlayDir, err)
+	}
+	
+	log.G(ctx).Infof("POC: Mounted tmpfs overlay (size: %dMB) for image volume at %s", tmpfsSize/(1024*1024), target)
 	if err := os.MkdirAll(target, 0755); err != nil {
 		return fmt.Errorf("failed to create target dir %q: %w", target, err)
 	}
 	
-	// Mount overlay filesystem
+	// Mount overlay filesystem using subdirectories within tmpfs
 	overlayMount := mount.Mount{
 		Type:    "overlay",
 		Source:  "overlay",
 		Options: []string{
-			fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDir, upperDir, workDir),
+			fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDir, upperOverlayDir, workOverlayDir),
 		},
 	}
 	
@@ -231,10 +290,18 @@ func (c *criService) cleanupImageMounts(
 		target := filepath.Join(targetBase, entry.Name())
 		entryName := entry.Name()
 
-		// Unmount the target
+		// Unmount the target (overlay)
 		err = mount.UnmountAll(target, 0)
 		if err != nil {
 			log.G(ctx).WithError(err).Warnf("failed to unmount image volume component %q", target)
+		}
+		
+		// Also unmount tmpfs upper and work directories
+		if strings.HasSuffix(entryName, "-upper") || strings.HasSuffix(entryName, "-work") {
+			err = mount.UnmountAll(target, 0)
+			if err != nil {
+				log.G(ctx).WithError(err).Debugf("failed to unmount tmpfs at %q", target)
+			}
 		}
 		
 		// POC: Handle snapshot cleanup for overlay setup
