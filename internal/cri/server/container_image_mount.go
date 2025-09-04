@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/leases"
@@ -32,6 +33,13 @@ import (
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
+
+func dirExists(path string) bool {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
 
 func (c *criService) mutateMounts(
 	ctx context.Context,
@@ -79,9 +87,12 @@ func (c *criService) mutateImageMount(
 	if extraMount.GetHostPath() != "" {
 		return fmt.Errorf("hostpath must be empty while mount image: %+v", extraMount)
 	}
-	if !extraMount.GetReadonly() {
-		return fmt.Errorf("readonly must be true while mount image: %+v", extraMount)
-	}
+	// POC: Force all image volumes to be writable via overlay filesystem
+	// TODO: Remove when Kubernetes API supports writable image volumes
+	// Original check:
+	// if !extraMount.GetReadonly() {
+	// 	return fmt.Errorf("readonly must be true while mount image: %+v", extraMount)
+	// }
 
 	ref := imageSpec.GetImage()
 	if ref == "" {
@@ -99,7 +110,13 @@ func (c *criService) mutateImageMount(
 	// This is a digest of the manifest
 	imageID := containerdImage.Target().Digest.Encoded()
 
-	target := c.getImageVolumeHostPath(sandboxID, imageID)
+	// POC: Use overlay filesystem to make image volumes writable
+	// Paths for overlay components
+	target := c.getImageVolumeHostPath(sandboxID, imageID+"-overlay")
+	lowerDir := c.getImageVolumeHostPath(sandboxID, imageID+"-lower")
+	// Use /dev/shm for upper/work directories for in-memory performance
+	upperDir := filepath.Join("/dev/shm/containerd-image-volumes", sandboxID, imageID+"-upper")
+	workDir := filepath.Join("/dev/shm/containerd-image-volumes", sandboxID, imageID+"-work")
 
 	// Already mounted in another container on the same pod
 	mounted, err := ensureImageVolumeMounted(target)
@@ -108,6 +125,8 @@ func (c *criService) mutateImageMount(
 	}
 	if mounted {
 		extraMount.HostPath = target
+		// POC: Mark mount as writable
+		extraMount.Readonly = false
 		return nil
 	}
 
@@ -128,10 +147,12 @@ func (c *criService) mutateImageMount(
 	chainID := identity.ChainID(diffIDs).String()
 
 	s := c.client.SnapshotService(snapshotter)
-	mounts, err := s.Prepare(ctx, target, chainID)
+	
+	// Prepare snapshot for lower directory with lowerDir as the key
+	mounts, err := s.Prepare(ctx, lowerDir, chainID)
 	if err != nil {
 		if errdefs.IsAlreadyExists(err) {
-			mounts, err = s.Mounts(ctx, target)
+			mounts, err = s.Mounts(ctx, lowerDir)
 		}
 	}
 	if err != nil {
@@ -139,21 +160,67 @@ func (c *criService) mutateImageMount(
 	}
 	defer func() {
 		if retErr != nil {
-			_ = s.Remove(ctx, target)
+			_ = s.Remove(ctx, lowerDir)
 		}
 	}()
-
-	err = os.MkdirAll(target, 0755)
-	if err != nil {
-		return fmt.Errorf("failed to create directory to image volume target path %q: %w", target, err)
+	
+	// Mount the snapshot to the lower layer (this puts the image content there)
+	if err := os.MkdirAll(lowerDir, 0755); err != nil {
+		return fmt.Errorf("failed to create lower dir %q: %w", lowerDir, err)
 	}
-
 	mounts = addVolatileOptionOnImageVolumeMount(mounts)
-	if err := mount.All(mounts, target); err != nil {
-		return fmt.Errorf("failed to mount image volume component %q: %w", target, err)
+	log.G(ctx).Infof("POC DEBUG: About to mount snapshot to lower dir %s with %d mounts", lowerDir, len(mounts))
+	if err := mount.All(mounts, lowerDir); err != nil {
+		return fmt.Errorf("failed to mount lower layer %q: %w", lowerDir, err)
 	}
-
+	log.G(ctx).Infof("POC DEBUG: Successfully mounted lower layer %s", lowerDir)
+	defer func() {
+		if retErr != nil {
+			_ = mount.UnmountAll(lowerDir, 0)
+		}
+	}()
+	
+	// Create upper and work directories in /dev/shm for in-memory performance
+	log.G(ctx).Infof("POC DEBUG: Creating /dev/shm directories - upper: %s, work: %s", upperDir, workDir)
+	if err := os.MkdirAll(upperDir, 0755); err != nil {
+		return fmt.Errorf("failed to create upper dir %q: %w", upperDir, err)
+	}
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		return fmt.Errorf("failed to create work dir %q: %w", workDir, err)
+	}
+	log.G(ctx).Infof("POC DEBUG: Created /dev/shm directories successfully")
+	defer func() {
+		if retErr != nil {
+			_ = os.RemoveAll(upperDir)
+			_ = os.RemoveAll(workDir)
+		}
+	}()
+	if err := os.MkdirAll(target, 0755); err != nil {
+		return fmt.Errorf("failed to create target dir %q: %w", target, err)
+	}
+	
+	// Mount overlay filesystem using /dev/shm directories
+	overlayOpts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDir, upperDir, workDir)
+	log.G(ctx).Infof("POC DEBUG: Mounting overlay with opts: %s", overlayOpts)
+	overlayMount := mount.Mount{
+		Type:    "overlay",
+		Source:  "overlay",
+		Options: []string{overlayOpts},
+	}
+	
+	if err := overlayMount.Mount(target); err != nil {
+		log.G(ctx).Errorf("POC DEBUG: Overlay mount failed - lower exists: %v, upper exists: %v, work exists: %v", 
+			dirExists(lowerDir), dirExists(upperDir), dirExists(workDir))
+		return fmt.Errorf("failed to mount writable overlay at %q: %w", target, err)
+	}
+	
+	log.G(ctx).Infof("POC DEBUG: Successfully mounted overlay at %s", target)
+	
 	extraMount.HostPath = target
+	// POC: Mark mount as writable
+	log.G(ctx).Infof("POC DEBUG: Setting extraMount.Readonly = false (was %v)", extraMount.GetReadonly())
+	extraMount.Readonly = false
+	log.G(ctx).Infof("POC DEBUG: Final mount - HostPath: %s, Readonly: %v", extraMount.HostPath, extraMount.Readonly)
 	return nil
 }
 
@@ -183,18 +250,37 @@ func (c *criService) cleanupImageMounts(
 
 	for _, entry := range entries {
 		target := filepath.Join(targetBase, entry.Name())
+		entryName := entry.Name()
 
+		// Unmount the target (overlay)
 		err = mount.UnmountAll(target, 0)
 		if err != nil {
-			return fmt.Errorf("failed to unmount image volume component %q: %w", target, err)
+			log.G(ctx).WithError(err).Warnf("failed to unmount image volume component %q", target)
 		}
-		err = s.Remove(ctx, target)
-		if err != nil && !errdefs.IsNotFound(err) {
-			return fmt.Errorf("failed to removing snapshot: %w", err)
+		
+		// Also unmount tmpfs upper and work directories
+		if strings.HasSuffix(entryName, "-upper") || strings.HasSuffix(entryName, "-work") {
+			err = mount.UnmountAll(target, 0)
+			if err != nil {
+				log.G(ctx).WithError(err).Debugf("failed to unmount tmpfs at %q", target)
+			}
 		}
-		err = os.Remove(target)
-		if err != nil && !errdefs.IsNotFound(err) {
-			return fmt.Errorf("failed to removing mounts directory: %w", err)
+		
+		// POC: Handle snapshot cleanup for overlay setup
+		// For lower directories, use the snapshot key format
+		if strings.HasSuffix(entryName, "-lower") {
+			imageID := strings.TrimSuffix(entryName, "-lower")
+			snapshotKey := fmt.Sprintf("%s-lower-%s", sandboxID, imageID)
+			err = s.Remove(ctx, snapshotKey)
+			if err != nil && !errdefs.IsNotFound(err) {
+				log.G(ctx).WithError(err).Debugf("failed to remove snapshot %q", snapshotKey)
+			}
+		}
+		
+		// Remove the directory
+		err = os.RemoveAll(target)
+		if err != nil && !os.IsNotExist(err) {
+			log.G(ctx).WithError(err).Warnf("failed to remove directory %q", target)
 		}
 	}
 
