@@ -36,8 +36,8 @@ jobs:
 
       - name: Check signature
         run: |
-          touch ~/.git/allowedSignersFile
-          git config --global gpg.ssh.allowedSignersFile ~/.git/allowedSignersFile
+          touch ${{ runner.temp }}/empty-allowedSignersFile
+          git config --global gpg.ssh.allowedSignersFile ${{ runner.temp }}/empty-allowedSignersFile
           releasever=${{ github.ref }}
           releasever="${releasever#refs/tags/}"
           TAGCHECK=$(git tag -v ${releasever} 2>&1 >/dev/null) ||
