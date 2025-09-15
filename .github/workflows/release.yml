@@ -41,6 +41,7 @@ jobs:
           TAGCHECK=$(git tag -v ${releasever} 2>&1 >/dev/null) ||
           echo "${TAGCHECK}" | grep -q "error" && {
               echo "::error::tag ${releasever} is not a signed tag. Failing release process."
+              echo "Output: ${TAGCHECK}"
               exit 1
           } || {
               echo "Tag ${releasever} is signed."
