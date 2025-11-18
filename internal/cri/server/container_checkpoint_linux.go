@@ -40,7 +40,6 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	containerstore "github.com/containerd/containerd/v2/internal/cri/store/container"
-	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	"github.com/containerd/containerd/v2/internal/cri/store/sandbox"
 	critypes "github.com/containerd/containerd/v2/internal/cri/types"
 	"github.com/containerd/containerd/v2/pkg/archive"
@@ -315,9 +314,19 @@ func (c *criService) CRImportCheckpoint(
 	// checkpoint archive as NAME@DIGEST. The checkpoint archive also contains
 	// the tag with which it was initially pulled.
 	// First step is to pull NAME@DIGEST
-	containerdImage, err := c.client.Pull(ctx, config.RootfsImageRef)
+	// Use the CRI image service's PullImage to ensure proper authentication (e.g., for ECR)
+	_, err = c.PullImage(ctx, config.RootfsImageRef, nil, sandboxConfig, sandbox.Metadata.RuntimeHandler)
 	if err != nil {
 		return "", fmt.Errorf("failed to pull checkpoint base image %s: %w", config.RootfsImageRef, err)
+	}
+	// Get the containerd image after pulling
+	image, err := c.LocalResolve(config.RootfsImageRef)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve checkpoint base image %s: %w", config.RootfsImageRef, err)
+	}
+	containerdImage, err := c.toContainerdImage(ctx, image)
+	if err != nil {
+		return "", fmt.Errorf("failed to get containerd image %s: %w", config.RootfsImageRef, err)
 	}
 	if _, err := reference.ParseAnyReference(config.RootfsImageName); err != nil {
 		return "", fmt.Errorf("error parsing reference: %q is not a valid repository/tag %v", config.RootfsImageName, err)
@@ -338,21 +347,6 @@ func (c *criService) CRImportCheckpoint(
 		if !errdefs.IsAlreadyExists(err) {
 			return "", fmt.Errorf("failed to tag checkpoint base image %s with %s: %w", config.RootfsImageRef, config.RootfsImageName, err)
 		}
-	}
-
-	var image imagestore.Image
-	for i := 1; i < 500; i++ {
-		// This is probably wrong. Not sure how to wait for an image to appear in
-		// the image (or content) store.
-		log.G(ctx).Debugf("Trying to resolve %s:%d", containerdImage.Name(), i)
-		image, err = c.LocalResolve(containerdImage.Name())
-		if err == nil {
-			break
-		}
-		time.Sleep(time.Microsecond * time.Duration(i))
-	}
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve image %q during checkpoint import: %w", config.RootfsImageName, err)
 	}
 	imageConfig := image.ImageSpec.Config
 	env := append([]string{}, imageConfig.Env...)
