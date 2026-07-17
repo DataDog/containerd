@@ -25,8 +25,8 @@ import (
 )
 
 // SanitizeError sanitizes an error by redacting sensitive information in URLs.
-// If the error contains a *url.Error, it parses and sanitizes the URL.
-// Otherwise, it returns the error unchanged.
+// If the error contains a *url.Error or an ErrUnexpectedStatus, it parses and
+// sanitizes the embedded URL. Otherwise, it returns the error unchanged.
 func SanitizeError(err error) error {
 	if err == nil {
 		return nil
