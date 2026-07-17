@@ -43,7 +43,7 @@ func TestSanitizeError_SimpleURLError(t *testing.T) {
 	sanitizedErr, ok := sanitized.(*sanitizedError)
 	require.True(t, ok, "Should return *sanitizedError type")
 	assert.Equal(t, urlErr, sanitizedErr.original)
-	assert.Equal(t, urlErr, sanitizedErr.urlError)
+	assert.Equal(t, originalURL, sanitizedErr.originalURL)
 	assert.Equal(t, "https://storage.blob.core.windows.net/container/blob?sig=%5BREDACTED%5D&sv=%5BREDACTED%5D", sanitizedErr.sanitizedURL)
 
 	// Test Error() method - verifies ReplaceAll functionality
