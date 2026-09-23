@@ -32,6 +32,7 @@ import (
 	"testing"
 
 	"github.com/containerd/containerd/v2/internal/userns"
+	"github.com/containerd/containerd/v2/pkg/testutil"
 	"github.com/containerd/continuity/sysx"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/require"
@@ -108,9 +109,7 @@ func setTestCapability(t *testing.T, path string) {
 }
 
 func TestChownPreservesFileCapabilities(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("requires root and CAP_SETFCAP")
-	}
+	testutil.RequiresRoot(t)
 	root := t.TempDir()
 	path := filepath.Join(root, "binary")
 	require.NoError(t, os.WriteFile(path, []byte("executable"), 0755))
@@ -164,9 +163,7 @@ func TestRemappedFileCapabilitiesExec(t *testing.T) {
 		fmt.Print(string(data))
 		return
 	}
-	if os.Geteuid() != 0 {
-		t.Skip("requires root and user namespace creation")
-	}
+	testutil.RequiresRoot(t)
 	root := t.TempDir()
 	require.NoError(t, os.Chmod(root, 0755))
 	// The testing package creates a parent directory with mode 0700.
