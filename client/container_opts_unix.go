@@ -98,7 +98,7 @@ func withRemappedSnapshotBase(id string, i Image, uidmaps, gidmaps []specs.Linux
 			return err
 		}
 		if err := remapRootFS(ctx, mounts, rsn.IDMap); err != nil {
-			snapshotter.Remove(ctx, usernsID)
+			snapshotter.Remove(ctx, usernsID+"-remap")
 			return err
 		}
 		if err := snapshotter.Commit(ctx, usernsID, usernsID+"-remap"); err != nil {
