@@ -24,6 +24,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/containerd/log"
@@ -250,86 +251,54 @@ func getUnprivilegedMountFlags(path string) (int, error) {
 }
 
 func doPrepareIDMappedOverlay(tmpDir string, lowerDirs []string, usernsFd int) (_ []string, _ func(), retErr error) {
-	commonDir, err := getCommonDirectory(lowerDirs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to determine common parent: %w", err)
+	if len(lowerDirs) == 0 {
+		return nil, nil, fmt.Errorf("no overlay lowerdirs provided")
 	}
 
 	tempRemountsLocation, err := os.MkdirTemp(tmpDir, "ovl-idmapped")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create temporary overlay lowerdir mount location: %w", err)
 	}
-	cleanDir := func() {
-		if err := os.Remove(tempRemountsLocation); err != nil {
-			log.L.WithError(err).Infof("failed to remove idmapped directory")
-		}
-	}
-	defer func() {
-		if retErr != nil {
-			cleanDir()
-		}
-	}()
 
-	// IDMapMount the directory containing all the layers
-	if err := IDMapMountWithAttrs(commonDir, tempRemountsLocation, usernsFd, unix.MOUNT_ATTR_RDONLY, 0); err != nil {
-		return nil, nil, err
-	}
-
-	cleanMount := func() {
-		// Use the Unmount helper that does retries because there can be easily an open fd
-		// to the idmapped directory and when containerd forks to create a userns fd (maybe
-		// for another container), it will make the mount busy for a few ms.
-		err := UnmountRecursive(tempRemountsLocation, 0)
-		if err != nil {
-			log.L.WithError(err).Warnf("failed to unmount idmapped directory %s: %v", tempRemountsLocation, err)
-		}
-	}
-	defer func() {
-		if retErr != nil {
-			cleanMount()
-		}
-	}()
-
-	// Build new lower dir paths through the idmapped directory
-	tmpLowerDirs := buildIDMappedPaths(lowerDirs, commonDir, tempRemountsLocation)
-
-	cleanup := func() {
-		cleanMount()
-		cleanDir()
-	}
-	return tmpLowerDirs, cleanup, nil
-}
-
-// getCommonDirectory finds the common directory among the lowerDirs passed in.
-// "/" and "." are considered invalid common directories and are treated as error
-func getCommonDirectory(lowerDirs []string) (string, error) {
-	commonPrefix := longestCommonPrefix(lowerDirs)
-	if commonPrefix == "" {
-		return "", fmt.Errorf("no common prefix found")
-	}
-
-	// Ensure the common prefix ends at a directory boundary
-	commonPrefix = path.Dir(commonPrefix)
-
-	if commonPrefix == "." || commonPrefix == "/" {
-		return "", fmt.Errorf("invalid common directory: %s", commonPrefix)
-	}
-
-	return commonPrefix, nil
-}
-
-// buildIDMappedPaths constructs new lower directory paths through an idmapped mount of the commonDir.
-// It takes the original lowerDirs, the commonDir of those dirs, and rewrites the paths
-// to go through the idMappedDir directory to achieve idmapped lowerdirs ready for overlayfs
-func buildIDMappedPaths(lowerDirs []string, commonDir, idMappedDir string) []string {
 	tmpLowerDirs := make([]string, 0, len(lowerDirs))
+	cleanup := func() {
+		for _, dir := range slices.Backward(tmpLowerDirs) {
+			// Retry unmounts because a concurrently forked process can briefly
+			// hold an inherited fd to the idmapped directory.
+			if err := UnmountRecursive(dir, 0); err != nil {
+				log.L.WithError(err).Warnf("failed to unmount idmapped directory %s", dir)
+				continue
+			}
+			// Never recursively remove a directory that might still be mounted.
+			if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+				log.L.WithError(err).Infof("failed to remove idmapped directory %s", dir)
+			}
+		}
+		if err := os.Remove(tempRemountsLocation); err != nil && !os.IsNotExist(err) {
+			log.L.WithError(err).Infof("failed to remove idmapped directory %s", tempRemountsLocation)
+		}
+	}
+	defer func() {
+		if retErr != nil {
+			cleanup()
+		}
+	}()
 
-	for _, lowerDir := range lowerDirs {
-		relativePath := strings.TrimPrefix(lowerDir, commonDir)
-		tmpLowerDirs = append(tmpLowerDirs, filepath.Join(idMappedDir, relativePath))
+	// Clone only the requested lowerdirs. Recursively cloning their common
+	// parent also includes unrelated mounts, which may not support idmapping
+	// (for example, FUSE mounts belonging to other snapshots).
+	for i, lowerDir := range lowerDirs {
+		target := filepath.Join(tempRemountsLocation, fmt.Sprintf("%d", i))
+		if err := os.Mkdir(target, 0755); err != nil {
+			return nil, nil, fmt.Errorf("failed to create idmapped lowerdir mount location: %w", err)
+		}
+		tmpLowerDirs = append(tmpLowerDirs, target)
+		if err := IDMapMountWithAttrs(lowerDir, target, usernsFd, unix.MOUNT_ATTR_RDONLY, 0); err != nil {
+			return nil, nil, fmt.Errorf("failed to idmap lowerdir %s: %w", lowerDir, err)
+		}
 	}
 
-	return tmpLowerDirs
+	return tmpLowerDirs, cleanup, nil
 }
 
 // parseMountOptions takes fstab style mount options and parses them for
