@@ -540,6 +540,44 @@ func TestDoPrepareIDMappedOverlayPartialFailure(t *testing.T) {
 	assert.Equal(t, "original", string(data))
 }
 
+func TestDoPrepareIDMappedOverlayNestedMountCleanup(t *testing.T) {
+	testutil.RequiresRoot(t)
+	td := t.TempDir()
+	if !supportsIDMap(td) {
+		t.Skip("IDmapped mounts not supported on filesystem selected by t.TempDir()")
+	}
+	lower := filepath.Join(td, "lower")
+	nested := filepath.Join(lower, "nested")
+	source := filepath.Join(td, "source")
+	require.NoError(t, os.MkdirAll(nested, 0755))
+	require.NoError(t, os.Mkdir(source, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(source, "file"), []byte("nested mount"), 0644))
+	require.NoError(t, unix.Mount(source, nested, "", unix.MS_BIND, ""))
+	t.Cleanup(func() { assert.NoError(t, UnmountAll(nested, 0)) })
+
+	usernsFD, err := GetUsernsFD("0:100000:65536", "0:200000:65536")
+	require.NoError(t, err)
+	defer usernsFD.Close()
+	remountsLocation := t.TempDir()
+	mapped, cleanup, err := doPrepareIDMappedOverlay(remountsLocation, []string{lower}, int(usernsFD.Fd()))
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.Len(t, mapped, 1)
+	data, err := os.ReadFile(filepath.Join(mapped[0], "nested/file"))
+	require.NoError(t, err)
+	assert.Equal(t, "nested mount", string(data))
+
+	// A direct unmount of the layer is busy while its cloned submount exists.
+	// Cleanup must unmount that child too, leaving the original mount intact.
+	cleanup()
+	entries, err := os.ReadDir(remountsLocation)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+	data, err = os.ReadFile(filepath.Join(nested, "file"))
+	require.NoError(t, err)
+	assert.Equal(t, "nested mount", string(data))
+}
+
 func TestGetUnprivilegedMountFlags(t *testing.T) {
 	testutil.RequiresRoot(t)
 

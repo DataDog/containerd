@@ -262,10 +262,21 @@ func doPrepareIDMappedOverlay(tmpDir string, lowerDirs []string, usernsFd int) (
 
 	tmpLowerDirs := make([]string, 0, len(lowerDirs))
 	cleanup := func() {
-		// Unmount all temporary layers with one mount-table scan. The helper
-		// retries busy mounts, which can briefly have fds inherited by a fork.
-		if err := UnmountRecursive(tempRemountsLocation, 0); err != nil {
-			log.L.WithError(err).Warnf("failed to unmount idmapped directories under %s", tempRemountsLocation)
+		// Try the known mountpoints first, avoiding a mount-table scan in the
+		// common case. Failed preparation or repeated cleanup can leave plain
+		// directories (EINVAL) or already removed directories (ENOENT).
+		needsRecursiveUnmount := false
+		for _, dir := range slices.Backward(tmpLowerDirs) {
+			if err := unix.Unmount(dir, 0); err != nil && err != unix.EINVAL && err != unix.ENOENT {
+				needsRecursiveUnmount = true
+			}
+		}
+		if needsRecursiveUnmount {
+			// A layer may contain submounts or be busy with an inherited fd.
+			// Scan once to unmount children first and retain the usual retries.
+			if err := UnmountRecursive(tempRemountsLocation, 0); err != nil {
+				log.L.WithError(err).Warnf("failed to unmount idmapped directories under %s", tempRemountsLocation)
+			}
 		}
 		for _, dir := range slices.Backward(tmpLowerDirs) {
 			// Never recursively remove a directory that might still be mounted.
