@@ -404,6 +404,180 @@ func TestDoPrepareIDMappedOverlay(t *testing.T) {
 	}
 }
 
+func TestIDMappedOverlayUnrelatedMount(t *testing.T) {
+	testutil.RequiresRoot(t)
+	ok, err := kernel.GreaterEqualThan(kernel.KernelVersion{Kernel: 5, Major: 19})
+	require.NoError(t, err)
+	if !ok {
+		t.Skip("overlayfs with idmapped lowerdirs requires kernel >= 5.19")
+	}
+
+	for _, fsType := range []string{"proc", "fuse"} {
+		t.Run(fsType, func(t *testing.T) {
+			if fsType == "fuse" {
+				if _, err := exec.LookPath("fuse-overlayfs"); err != nil {
+					t.Skip("fuse-overlayfs not installed")
+				}
+			}
+			td := t.TempDir()
+			if !supportsIDMap(td) {
+				t.Skip("IDmapped mounts not supported on filesystem selected by t.TempDir()")
+			}
+
+			lowerDirs := []string{filepath.Join(td, "snapshots/1/fs"), filepath.Join(td, "snapshots/2/fs")}
+			for i, dir := range lowerDirs {
+				require.NoError(t, os.MkdirAll(dir, 0755))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "shared"), fmt.Appendf(nil, "layer %d", i), 0644))
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(lowerDirs[1], "bottom"), []byte("bottom"), 0644))
+
+			// This mount shares the snapshots directory with the lowerdirs but
+			// is not part of either layer. It must not be cloned or idmapped.
+			unrelated := filepath.Join(td, "snapshots/50/mnt")
+			require.NoError(t, os.MkdirAll(unrelated, 0755))
+			if fsType == "proc" {
+				require.NoError(t, unix.Mount("proc", unrelated, "proc", 0, ""))
+			} else {
+				for _, dir := range []string{"fuse-lower1", "fuse-lower2", "fuse-upper", "fuse-work"} {
+					require.NoError(t, os.Mkdir(filepath.Join(td, dir), 0755))
+				}
+				m := Mount{
+					Type:   "fuse3.fuse-overlayfs",
+					Source: "overlay",
+					Options: []string{fmt.Sprintf("lowerdir=%s:%s,upperdir=%s,workdir=%s",
+						filepath.Join(td, "fuse-lower1"), filepath.Join(td, "fuse-lower2"),
+						filepath.Join(td, "fuse-upper"), filepath.Join(td, "fuse-work"))},
+				}
+				require.NoError(t, m.Mount(unrelated))
+			}
+			t.Cleanup(func() { assert.NoError(t, UnmountAll(unrelated, 0)) })
+			var originalFS unix.Statfs_t
+			require.NoError(t, unix.Statfs(unrelated, &originalFS))
+
+			usernsFD, err := GetUsernsFD("0:100000:65536", "0:200000:65536")
+			require.NoError(t, err)
+			defer usernsFD.Close()
+			remountsLocation := t.TempDir()
+			mapped, cleanup, err := doPrepareIDMappedOverlay(remountsLocation, lowerDirs, int(usernsFD.Fd()))
+			require.NoError(t, err)
+			t.Cleanup(cleanup)
+			require.Len(t, mapped, len(lowerDirs))
+			for _, dir := range mapped {
+				assert.ErrorIs(t, os.WriteFile(filepath.Join(dir, "new"), nil, 0644), unix.EROFS)
+			}
+			cleanup()
+			entries, err := os.ReadDir(remountsLocation)
+			require.NoError(t, err)
+			assert.Empty(t, entries)
+
+			for _, dir := range []string{"upper", "work", "merged"} {
+				require.NoError(t, os.Mkdir(filepath.Join(td, dir), 0755))
+			}
+			m := Mount{
+				Type:   "overlay",
+				Source: "overlay",
+				Options: []string{
+					"lowerdir=" + strings.Join(lowerDirs, ":"),
+					"upperdir=" + filepath.Join(td, "upper"),
+					"workdir=" + filepath.Join(td, "work"),
+					"uidmap=0:100000:65536", "gidmap=0:200000:65536",
+				},
+			}
+			merged := filepath.Join(td, "merged")
+			require.NoError(t, m.Mount(merged))
+			t.Cleanup(func() { assert.NoError(t, UnmountAll(merged, 0)) })
+			for name, content := range map[string]string{"shared": "layer 0", "bottom": "bottom"} {
+				data, err := os.ReadFile(filepath.Join(merged, name))
+				require.NoError(t, err)
+				assert.Equal(t, content, string(data))
+				var st unix.Stat_t
+				require.NoError(t, unix.Stat(filepath.Join(merged, name), &st))
+				assert.EqualValues(t, 100000, st.Uid)
+				assert.EqualValues(t, 200000, st.Gid)
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(merged, "shared"), []byte("copied up"), 0644))
+			for i, dir := range lowerDirs {
+				data, err := os.ReadFile(filepath.Join(dir, "shared"))
+				require.NoError(t, err)
+				assert.Equal(t, fmt.Sprintf("layer %d", i), string(data))
+				var st unix.Stat_t
+				require.NoError(t, unix.Stat(filepath.Join(dir, "shared"), &st))
+				assert.Zero(t, st.Uid)
+				assert.Zero(t, st.Gid)
+			}
+			var currentFS unix.Statfs_t
+			require.NoError(t, unix.Statfs(unrelated, &currentFS))
+			assert.Equal(t, originalFS.Type, currentFS.Type)
+			assert.Equal(t, originalFS.Fsid, currentFS.Fsid)
+		})
+	}
+}
+
+func TestDoPrepareIDMappedOverlayPartialFailure(t *testing.T) {
+	testutil.RequiresRoot(t)
+	td := t.TempDir()
+	if !supportsIDMap(td) {
+		t.Skip("IDmapped mounts not supported on filesystem selected by t.TempDir()")
+	}
+	lower := filepath.Join(td, "lower")
+	require.NoError(t, os.Mkdir(lower, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(lower, "file"), []byte("original"), 0644))
+	usernsFD, err := getUsernsFD(testUIDMaps, testGIDMaps)
+	require.NoError(t, err)
+	defer usernsFD.Close()
+
+	remountsLocation := t.TempDir()
+	_, cleanup, err := doPrepareIDMappedOverlay(remountsLocation, []string{lower, filepath.Join(td, "missing")}, int(usernsFD.Fd()))
+	if cleanup != nil {
+		t.Cleanup(cleanup)
+	}
+	require.Error(t, err)
+	entries, err := os.ReadDir(remountsLocation)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "failed preparation must remove earlier mounts and temporary directories")
+	data, err := os.ReadFile(filepath.Join(lower, "file"))
+	require.NoError(t, err)
+	assert.Equal(t, "original", string(data))
+}
+
+func TestDoPrepareIDMappedOverlayNestedMountCleanup(t *testing.T) {
+	testutil.RequiresRoot(t)
+	td := t.TempDir()
+	if !supportsIDMap(td) {
+		t.Skip("IDmapped mounts not supported on filesystem selected by t.TempDir()")
+	}
+	lower := filepath.Join(td, "lower")
+	nested := filepath.Join(lower, "nested")
+	source := filepath.Join(td, "source")
+	require.NoError(t, os.MkdirAll(nested, 0755))
+	require.NoError(t, os.Mkdir(source, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(source, "file"), []byte("nested mount"), 0644))
+	require.NoError(t, unix.Mount(source, nested, "", unix.MS_BIND, ""))
+	t.Cleanup(func() { assert.NoError(t, UnmountAll(nested, 0)) })
+
+	usernsFD, err := GetUsernsFD("0:100000:65536", "0:200000:65536")
+	require.NoError(t, err)
+	defer usernsFD.Close()
+	remountsLocation := t.TempDir()
+	mapped, cleanup, err := doPrepareIDMappedOverlay(remountsLocation, []string{lower}, int(usernsFD.Fd()))
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.Len(t, mapped, 1)
+	data, err := os.ReadFile(filepath.Join(mapped[0], "nested/file"))
+	require.NoError(t, err)
+	assert.Equal(t, "nested mount", string(data))
+
+	// A direct unmount of the layer is busy while its cloned submount exists.
+	// Cleanup must unmount that child too, leaving the original mount intact.
+	cleanup()
+	entries, err := os.ReadDir(remountsLocation)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+	data, err = os.ReadFile(filepath.Join(nested, "file"))
+	require.NoError(t, err)
+	assert.Equal(t, "nested mount", string(data))
+}
+
 func TestGetUnprivilegedMountFlags(t *testing.T) {
 	testutil.RequiresRoot(t)
 
@@ -535,167 +709,6 @@ func supportsIDMap(path string) bool {
 	}
 
 	return true
-}
-
-func TestBuildIDMappedPaths(t *testing.T) {
-	testCases := []struct {
-		name        string
-		lowerDirs   []string
-		commonDir   string
-		idMappedDir string
-		expected    []string
-	}{
-		{
-			name: "basic path rewriting",
-			lowerDirs: []string{
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/2/fs",
-			},
-			commonDir:   "/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots",
-			idMappedDir: "/tmp/idmapped123",
-			expected: []string{
-				"/tmp/idmapped123/1/fs",
-				"/tmp/idmapped123/2/fs",
-			},
-		},
-		{
-			name: "single layer",
-			lowerDirs: []string{
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs",
-			},
-			commonDir:   "/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs",
-			idMappedDir: "/tmp/idmapped789",
-			expected: []string{
-				"/tmp/idmapped789",
-			},
-		},
-		{
-			name: "single layer with ending slash",
-			lowerDirs: []string{
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs/",
-			},
-			commonDir:   "/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/1/fs/",
-			idMappedDir: "/tmp/idmapped789",
-			expected: []string{
-				"/tmp/idmapped789",
-			},
-		},
-		{
-			name: "snapshots with common prefix in snapshot id",
-			lowerDirs: []string{
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/79/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/78/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/77/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/76/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/75/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/73/fs",
-			},
-			commonDir:   "/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots",
-			idMappedDir: "/tmp/ovl-idmapped1095187461",
-			expected: []string{
-				"/tmp/ovl-idmapped1095187461/79/fs",
-				"/tmp/ovl-idmapped1095187461/78/fs",
-				"/tmp/ovl-idmapped1095187461/77/fs",
-				"/tmp/ovl-idmapped1095187461/76/fs",
-				"/tmp/ovl-idmapped1095187461/75/fs",
-				"/tmp/ovl-idmapped1095187461/73/fs",
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := buildIDMappedPaths(tc.lowerDirs, tc.commonDir, tc.idMappedDir)
-
-			if len(result) != len(tc.expected) {
-				t.Fatalf("expected %d paths, got %d", len(tc.expected), len(result))
-			}
-
-			for i, expected := range tc.expected {
-				if result[i] != expected {
-					t.Errorf("path %d: expected %s, got %s", i, expected, result[i])
-				}
-			}
-		})
-	}
-}
-
-func TestGetCommonDirectory(t *testing.T) {
-	testCases := []struct {
-		name        string
-		lowerDirs   []string
-		expected    string
-		expectError bool
-		errorMsg    string
-	}{
-		{
-			name:        "no lowerdirs",
-			lowerDirs:   []string{},
-			expectError: true,
-			errorMsg:    "no common prefix found",
-		},
-		{
-			name: "normal snapshots",
-			lowerDirs: []string{
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/37712/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/16590/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/16585/fs",
-			},
-			expected: "/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots",
-		},
-		{
-			name: "no common prefix at all",
-			lowerDirs: []string{
-				"/completely/different/path/1",
-				"/totally/unrelated/path/2",
-			},
-			expectError: true,
-			errorMsg:    "invalid common directory:",
-		},
-		{
-			name: "single dir",
-			lowerDirs: []string{
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/16585/fs",
-			},
-			expected: "/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/16585",
-		},
-		{
-			name: "snapshots with common prefix in snapshot id",
-			lowerDirs: []string{
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/79/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/78/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/77/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/76/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/75/fs",
-				"/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/73/fs",
-			},
-			expected: "/mnt/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			result, err := getCommonDirectory(tc.lowerDirs)
-
-			if tc.expectError {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.errorMsg)
-				}
-				if !strings.Contains(err.Error(), tc.errorMsg) {
-					t.Errorf("expected error containing %q, got %q", tc.errorMsg, err.Error())
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			if result != tc.expected {
-				t.Errorf("expected %q, got %q", tc.expected, result)
-			}
-		})
-	}
 }
 
 func TestXContainerdOptionsFiltered(t *testing.T) {
