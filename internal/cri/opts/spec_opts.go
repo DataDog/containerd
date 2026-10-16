@@ -295,8 +295,10 @@ func WithAmbientCapabilities(sc *runtime.LinuxContainerSecurityContext, allCaps 
 	return oci.Compose(opts...)
 }
 
-// withAmbientCapabilitySets grants the final ambient set in the prerequisite
-// sets, preserving existing ordinary and inheritable capabilities.
+// withAmbientCapabilitySets adds the final ambient capabilities to the bounding,
+// effective, permitted, and inheritable sets, preserving existing entries.
+// Linux requires ambient capabilities to be permitted and inheritable; adding
+// them to bounding and effective follows the ordinary capability grant behavior.
 func withAmbientCapabilitySets(ctx context.Context, client oci.Client, c *containers.Container, s *runtimespec.Spec) error {
 	ambient := s.Process.Capabilities.Ambient
 	return oci.Compose(
